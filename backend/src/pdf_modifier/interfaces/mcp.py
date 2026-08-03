@@ -50,6 +50,27 @@ def handle_mcp_errors(func: Callable[..., str]) -> Callable[..., str]:
     return wrapper
 
 
+def _parse_redact_fill(
+    value: list[float] | str | None,
+) -> tuple[float, float, float] | None:
+    """Normalize an MCP redaction fill value for the core modifier."""
+    if value is None:
+        return (1.0, 1.0, 1.0)
+    if isinstance(value, str):
+        if value.strip().lower() == "none":
+            return None
+        raise ValueError("redact_fill must be 'none' or a list of three RGB values")
+    if not isinstance(value, list | tuple) or len(value) != 3:
+        raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0")
+    try:
+        components = tuple(float(component) for component in value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0") from e
+    if any(not 0.0 <= component <= 1.0 for component in components):
+        raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0")
+    return (components[0], components[1], components[2])
+
+
 @mcp.tool()
 @handle_mcp_errors
 def read_pdf_structure(
@@ -143,6 +164,8 @@ def modify_pdf_content(
     password: str | None = None,
     pages: str | None = None,
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+    custom_fonts: dict[str, str] | None = None,
+    redact_fill: list[float] | str | None = None,
 ) -> str:
     """
     Find and replace text in a PDF while preserving font styles.
@@ -157,6 +180,7 @@ def modify_pdf_content(
     - Font style is approximated using Base 14 fonts (Helvetica, Times, Courier)
     - Replacement text should be similar length to avoid overlap
     - Multiple replacements can be specified in a single call
+    - Custom font aliases may be raw PDF font names or Base 14 codes
 
     HYPERLINK SUPPORT:
     - Append "|URL" to create a clickable link: "Click Here|https://example.com"
@@ -184,6 +208,10 @@ def modify_pdf_content(
         password: Optional password if the source PDF is encrypted.
         pages: Optional page range, e.g. "1-3" or "5". Defaults to all pages.
         max_file_size: Maximum allowed input file size in bytes (default: 100 MB).
+        custom_fonts: Optional map from a raw PDF font name or Base 14 code such as
+                      "helv"/"HeBo" to an absolute .ttf/.otf path. Use TTF for CJK.
+        redact_fill: Redaction RGB color as [r, g, b] with values from 0.0 to 1.0.
+                     Use "none" for no fill. Omit for the default white fill.
 
     Returns:
         JSON string with modification results including:
@@ -222,6 +250,15 @@ def modify_pdf_content(
             {"Draft": "Final"},
             pages="1-2"
         )
+
+        # Use a custom bold font and light gray redaction fill
+        modify_pdf_content(
+            "/path/input.pdf",
+            "/path/output.pdf",
+            {"Draft": "Final"},
+            custom_fonts={"HeBo": "/absolute/path/to/font.ttf"},
+            redact_fill=[0.9, 0.9, 0.9]
+        )
     """
     spec = ReplacementSpec(replacements=replacements, use_regex=use_regex)
 
@@ -238,6 +275,8 @@ def modify_pdf_content(
         output_path,
         password=password,
         max_file_size=max_file_size,
+        custom_fonts=custom_fonts,
+        redact_fill=_parse_redact_fill(redact_fill),
     )
     result = modifier.process(spec, pages=page_range)
     return result.model_dump_json(indent=2)
@@ -336,6 +375,8 @@ def batch_modify_pdf_content(
     use_regex: bool = False,
     password: str | None = None,
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+    custom_fonts: dict[str, str] | None = None,
+    redact_fill: list[float] | str | None = None,
 ) -> str:
     """
     Apply the same text replacements to multiple PDF files at once.
@@ -351,6 +392,10 @@ def batch_modify_pdf_content(
         use_regex: If true, treat keys as regex patterns.
         password: Optional password if PDFs are encrypted.
         max_file_size: Maximum allowed input file size in bytes (default: 100 MB).
+        custom_fonts: Optional map from a raw PDF font name or Base 14 code such as
+                      "helv"/"HeBo" to an absolute .ttf/.otf path. Use TTF for CJK.
+        redact_fill: Redaction RGB color as [r, g, b] with values from 0.0 to 1.0.
+                     Use "none" for no fill. Omit for the default white fill.
 
     Returns:
         JSON string with batch results including per-file status.
@@ -359,7 +404,9 @@ def batch_modify_pdf_content(
         batch_modify_pdf_content(
             ["/path/a.pdf", "/path/b.pdf"],
             "/path/output",
-            {"Draft": "Final", "2024": "2025"}
+            {"Draft": "Final", "2024": "2025"},
+            custom_fonts={"helv": "/absolute/path/to/cjk-font.ttf"},
+            redact_fill="none"
         )
     """
     spec = ReplacementSpec(replacements=replacements, use_regex=use_regex)
@@ -369,6 +416,8 @@ def batch_modify_pdf_content(
         spec,
         password=password,
         max_file_size=max_file_size,
+        custom_fonts=custom_fonts,
+        redact_fill=_parse_redact_fill(redact_fill),
     )
     return result.model_dump_json(indent=2)
 

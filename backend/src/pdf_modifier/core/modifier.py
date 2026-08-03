@@ -54,12 +54,14 @@ class PDFModifier:
         password: str | None = None,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         custom_fonts: dict[str, str] | None = None,
+        redact_fill: tuple[float, float, float] | None = (1.0, 1.0, 1.0),
     ) -> None:
         self.input_path = Path(input_path).absolute()
         self.output_path = Path(output_path).absolute()
         self.password = password
         self.max_file_size = max_file_size
         self._custom_fonts = self._validate_custom_fonts(custom_fonts or {})
+        self._redact_fill = self._validate_redact_fill(redact_fill)
         self._font_resolver = FontResolver()
 
         if self.input_path == self.output_path:
@@ -99,6 +101,23 @@ class PDFModifier:
             if p.suffix.lower() not in (".ttf", ".otf"):
                 raise ValueError(f"font file must be .ttf or .otf: {path}")
         return custom_fonts
+
+    @staticmethod
+    def _validate_redact_fill(
+        redact_fill: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float] | None:
+        """Validate an optional RGB redaction fill color."""
+        if redact_fill is None:
+            return None
+        if not isinstance(redact_fill, tuple | list) or len(redact_fill) != 3:
+            raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0")
+        try:
+            components = tuple(float(component) for component in redact_fill)
+        except (TypeError, ValueError) as e:
+            raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0") from e
+        if any(not 0.0 <= component <= 1.0 for component in components):
+            raise ValueError("redact_fill must contain three RGB values between 0.0 and 1.0")
+        return (components[0], components[1], components[2])
 
     def _open_doc(self) -> fitz.Document:
         """Safely open the document with password authentication if required."""
@@ -156,9 +175,15 @@ class PDFModifier:
         for item in items:
             if "bboxes" in item:
                 for bbox in item["bboxes"]:
-                    page.add_redact_annot(bbox, fill=(1, 1, 1))
+                    page.add_redact_annot(
+                        bbox,
+                        fill=self._redact_fill if self._redact_fill is not None else False,
+                    )
             else:
-                page.add_redact_annot(item["bbox"], fill=(1, 1, 1))
+                page.add_redact_annot(
+                    item["bbox"],
+                    fill=self._redact_fill if self._redact_fill is not None else False,
+                )
 
         page.apply_redactions()
 
@@ -593,6 +618,7 @@ def batch_process(
     password: str | None = None,
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     custom_fonts: dict[str, str] | None = None,
+    redact_fill: tuple[float, float, float] | None = (1.0, 1.0, 1.0),
 ) -> BatchResult:
     """
     Apply the same replacements to multiple PDF files.
@@ -607,6 +633,8 @@ def batch_process(
         spec: ReplacementSpec containing replacements and options.
         password: Optional password for encrypted PDFs.
         custom_fonts: Optional map of alias -> font file path.
+        redact_fill: Optional RGB redaction fill. None disables the fill.
+                     Defaults to white (1.0, 1.0, 1.0).
 
     Returns:
         BatchResult with per-file results and aggregate statistics.
@@ -632,6 +660,7 @@ def batch_process(
                 password=password,
                 max_file_size=max_file_size,
                 custom_fonts=custom_fonts,
+                redact_fill=redact_fill,
             )
             result = modifier.process(spec)
             results.append(result)

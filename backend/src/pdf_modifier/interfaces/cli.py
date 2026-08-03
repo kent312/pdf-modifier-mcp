@@ -47,6 +47,29 @@ def _parse_custom_fonts(ctx: Any, fonts: list[str] | None) -> dict[str, str] | N
     return result
 
 
+def _parse_redact_fill(value: str | None) -> tuple[float, float, float] | None:
+    """Parse --redact-fill as an RGB tuple or disabled fill."""
+    if value is None:
+        return (1.0, 1.0, 1.0)
+    if value.strip().lower() == "none":
+        return None
+
+    parts = value.split(",")
+    try:
+        components = tuple(float(part.strip()) for part in parts)
+    except ValueError:
+        components = ()
+
+    if len(components) != 3 or any(not 0.0 <= component <= 1.0 for component in components):
+        console.print(
+            f"[red]Error:[/] Invalid redact fill '{value}'. "
+            "Use 'R,G,B' with values from 0.0 to 1.0, or 'none'."
+        )
+        raise typer.Exit(code=1)
+
+    return (components[0], components[1], components[2])
+
+
 logger = setup_logging(__name__)
 
 app = typer.Typer(
@@ -92,6 +115,13 @@ def modify(
             help="Custom font mapping. Format: 'alias=/path/to/font.ttf'. Repeatable.",
         ),
     ] = None,
+    redact_fill: Annotated[
+        str | None,
+        typer.Option(
+            "--redact-fill",
+            help="Redaction fill as R,G,B floats from 0-1, or 'none' for no fill.",
+        ),
+    ] = None,
     max_size: Annotated[
         int | None,
         typer.Option(
@@ -120,6 +150,8 @@ def modify(
     if not replacements:
         console.print("[red]Error:[/] No valid replacements provided.")
         raise typer.Exit(code=1)
+
+    parsed_redact_fill = _parse_redact_fill(redact_fill)
 
     page_range: tuple[int, int] | None = None
     if pages:
@@ -151,6 +183,7 @@ def modify(
             password=password,
             max_file_size=max_file_size,
             custom_fonts=cf,
+            redact_fill=parsed_redact_fill,
         )
 
         with console.status("[bold green]Modifying PDF...", spinner="dots"):
@@ -211,6 +244,13 @@ def batch(
             help="Custom font mapping. Format: 'alias=/path/to/font.ttf'. Repeatable.",
         ),
     ] = None,
+    redact_fill: Annotated[
+        str | None,
+        typer.Option(
+            "--redact-fill",
+            help="Redaction fill as R,G,B floats from 0-1, or 'none' for no fill.",
+        ),
+    ] = None,
     max_size: Annotated[
         int | None,
         typer.Option(
@@ -241,6 +281,8 @@ def batch(
         console.print("[red]Error:[/] No valid replacements provided.")
         raise typer.Exit(code=1)
 
+    parsed_redact_fill = _parse_redact_fill(redact_fill)
+
     try:
         spec = ReplacementSpec(replacements=replacements, use_regex=regex)
         cf = _parse_custom_fonts(None, custom_fonts) if custom_fonts else None
@@ -254,6 +296,7 @@ def batch(
                 password=password,
                 max_file_size=max_file_size,
                 custom_fonts=cf,
+                redact_fill=parsed_redact_fill,
             )
 
         table = Table(title="Batch Results")

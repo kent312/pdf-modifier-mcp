@@ -217,6 +217,91 @@ class TestFontResolverWithCustomFonts:
 
         assert props.fontfile == str(font_file)
 
+    def test_unknown_font_uses_style_specific_custom_font(
+        self, resolver: FontResolver, tmp_path: Path
+    ) -> None:
+        """Step 5 uses the effective style to select a custom Base 14 alias."""
+        font_file = tmp_path / "bold.ttf"
+        font_file.write_bytes(b"fake ttf")
+
+        props = resolver.resolve(
+            "Tomorrow-Regular",
+            font_flags={"bold": 1, "italic": 0},
+            custom_fonts={"HeBo": str(font_file)},
+        )
+
+        assert props.fontname == "HeBo"
+        assert props.fontfile == str(font_file)
+        assert props.is_bold is True
+        assert props.embed is True
+
+    def test_unknown_font_uses_helv_custom_fallback_when_style_alias_missing(
+        self, resolver: FontResolver, tmp_path: Path
+    ) -> None:
+        """Step 5 falls back from a missing style alias to a custom helv alias."""
+        font_file = tmp_path / "regular.ttf"
+        font_file.write_bytes(b"fake ttf")
+
+        props = resolver.resolve(
+            "Tomorrow-Regular",
+            font_flags={"italic": 1},
+            custom_fonts={"helv": str(font_file)},
+        )
+
+        assert props.fontname == "helv"
+        assert props.fontfile == str(font_file)
+        assert props.is_italic is True
+        assert props.embed is True
+
+    def test_unknown_font_without_custom_fallback_uses_plain_helv(
+        self, resolver: FontResolver
+    ) -> None:
+        """Step 5 preserves the original plain Helvetica fallback."""
+        props = resolver.resolve(
+            "Tomorrow-Regular",
+            font_flags={"italic": 1},
+            custom_fonts={"unrelated": "/missing/font.ttf"},
+        )
+
+        assert props.fontname == "helv"
+        assert props.fontfile is None
+        assert props.is_italic is True
+
+    def test_unknown_bold_italic_font_falls_back_to_custom_helvi(
+        self, resolver: FontResolver, tmp_path: Path
+    ) -> None:
+        """Step 5 tries HeBo, then helvi, then helv for bold+italic flags."""
+        font_file = tmp_path / "italic.ttf"
+        font_file.write_bytes(b"fake ttf")
+
+        props = resolver.resolve(
+            "Tomorrow-Regular",
+            font_flags={"bold": 1, "italic": 1},
+            custom_fonts={"helvi": str(font_file)},
+        )
+
+        assert props.fontname == "helvi"
+        assert props.fontfile == str(font_file)
+        assert props.is_bold is True
+        assert props.is_italic is True
+
+    def test_unknown_font_skips_invalid_custom_font_file(
+        self, resolver: FontResolver, tmp_path: Path
+    ) -> None:
+        """Step 5 ignores custom aliases whose files are invalid."""
+        invalid_font = tmp_path / "bold.txt"
+        invalid_font.write_bytes(b"not a font")
+
+        props = resolver.resolve(
+            "Tomorrow-Regular",
+            font_flags={"bold": 1},
+            custom_fonts={"HeBo": str(invalid_font)},
+        )
+
+        assert props.fontname == "helv"
+        assert props.fontfile is None
+        assert props.is_bold is True
+
 
 class TestFontResolverFallback:
     """Tests that FontResolver preserves existing _get_font_properties behavior."""

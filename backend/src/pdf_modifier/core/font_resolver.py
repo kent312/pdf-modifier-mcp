@@ -65,7 +65,8 @@ class FontResolver:
         1. Custom font match (if alias matches font name directly)
         2. Base 14 font name pattern matching
         3. Custom font match by resolved Base 14 code (if alias matches)
-        4. Fallback to Helvetica
+        4. For unknown names, custom font match by effective Base 14 style code
+        5. Custom ``helv`` fallback, then built-in Helvetica
 
         Args:
             font_name: Font name from PDF span (e.g. "Arial-BoldMT").
@@ -133,13 +134,41 @@ class FontResolver:
                 embed=True,
             )
 
-        # Step 5: Fallback to Helvetica
+        # Step 5: Use font flags to resolve an unknown font to a custom
+        # Helvetica style, falling back to a custom regular Helvetica font.
+        is_bold = font_flags.get("bold", 0) == 1 if font_flags else False
+        is_italic = font_flags.get("italic", 0) == 1 if font_flags else False
+        is_serif = font_flags.get("serif", 0) == 1 if font_flags else False
+        is_monospaced = font_flags.get("mono", 0) == 1 if font_flags else False
+        # Alias candidates cover Helvetica styles only; serif/mono flags are
+        # reflected in FontProperties but do not affect alias selection.
+        aliases: list[str] = []
+        if is_bold:
+            aliases.append("HeBo")
+        if is_italic:
+            aliases.append("helvi")
+        aliases.append("helv")
+
+        if custom_fonts:
+            for alias in aliases:
+                candidate_path = custom_fonts.get(alias)
+                if candidate_path and self._is_valid_font_file(candidate_path):
+                    return FontProperties(
+                        fontname=alias,
+                        fontfile=candidate_path,
+                        is_bold=is_bold,
+                        is_italic=is_italic,
+                        is_serif=is_serif,
+                        is_monospaced=is_monospaced,
+                        embed=True,
+                    )
+
         return FontProperties(
             fontname="helv",
-            is_bold=font_flags.get("bold", 0) == 1 if font_flags else False,
-            is_italic=font_flags.get("italic", 0) == 1 if font_flags else False,
-            is_serif=font_flags.get("serif", 0) == 1 if font_flags else False,
-            is_monospaced=font_flags.get("mono", 0) == 1 if font_flags else False,
+            is_bold=is_bold,
+            is_italic=is_italic,
+            is_serif=is_serif,
+            is_monospaced=is_monospaced,
             embed=True,
         )
 
