@@ -109,13 +109,19 @@ class HyperlinkInventory(BaseModel):
 
 
 class ModificationResult(BaseModel):
-    """Result of PDF modification operation."""
+    """Result of PDF modification operation.
+
+    ``failed_insertions`` counts items whose original text was redacted but
+    whose replacement could not be inserted. When it is non-zero the output
+    has blank regions where those matches were — inspect ``warnings``.
+    """
 
     success: bool
     input_path: str
     output_path: str
     replacements_made: int
     pages_modified: int
+    failed_insertions: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 

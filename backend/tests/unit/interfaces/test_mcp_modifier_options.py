@@ -86,3 +86,41 @@ def test_modify_rejects_invalid_redact_fill(redact_fill: Any) -> None:
     data = json.loads(response)
     assert data["success"] is False
     assert "redact_fill" in data["message"]
+
+
+def test_modify_wires_fit_text(monkeypatch: Any) -> None:
+    """The single-file MCP tool forwards fit_text to PDFModifier."""
+    captured: dict[str, Any] = {}
+    result = MagicMock()
+    result.model_dump_json.return_value = "{}"
+
+    class FakeModifier:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def process(self, *args: Any, **kwargs: Any) -> MagicMock:
+            return result
+
+    monkeypatch.setattr(mcp_module, "PDFModifier", FakeModifier)
+
+    modify_pdf_content("/input.pdf", "/output.pdf", {"old": "new"}, fit_text=True)
+    assert captured["fit_text"] is True
+
+    modify_pdf_content("/input.pdf", "/output.pdf", {"old": "new"})
+    assert captured["fit_text"] is False
+
+
+def test_batch_wires_fit_text(monkeypatch: Any) -> None:
+    """The batch MCP tool forwards fit_text to batch_process."""
+    captured: dict[str, Any] = {}
+    result = MagicMock()
+    result.model_dump_json.return_value = "{}"
+
+    def fake_batch_process(*args: Any, **kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(mcp_module, "batch_process", fake_batch_process)
+
+    batch_modify_pdf_content(["/input.pdf"], "/output", {"old": "new"}, fit_text=True)
+    assert captured["fit_text"] is True

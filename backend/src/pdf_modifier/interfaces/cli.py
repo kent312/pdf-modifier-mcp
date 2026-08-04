@@ -122,6 +122,13 @@ def modify(
             help="Redaction fill as R,G,B floats from 0-1, or 'none' for no fill.",
         ),
     ] = None,
+    fit_text: Annotated[
+        bool,
+        typer.Option(
+            "--fit-text",
+            help="Shrink replacement text so it fits the original text's width.",
+        ),
+    ] = False,
     max_size: Annotated[
         int | None,
         typer.Option(
@@ -184,6 +191,7 @@ def modify(
             max_file_size=max_file_size,
             custom_fonts=cf,
             redact_fill=parsed_redact_fill,
+            fit_text=fit_text,
         )
 
         with console.status("[bold green]Modifying PDF...", spinner="dots"):
@@ -192,6 +200,11 @@ def modify(
         console.print(f"[green]Success:[/] Saved to {result.output_path}")
         console.print(f"  Replacements: {result.replacements_made}")
         console.print(f"  Pages modified: {result.pages_modified}")
+        if result.failed_insertions:
+            console.print(
+                f"[red]Failed insertions:[/] {result.failed_insertions} "
+                "(original text redacted but replacement not inserted)"
+            )
 
         if result.warnings:
             for warn in result.warnings:
@@ -251,6 +264,13 @@ def batch(
             help="Redaction fill as R,G,B floats from 0-1, or 'none' for no fill.",
         ),
     ] = None,
+    fit_text: Annotated[
+        bool,
+        typer.Option(
+            "--fit-text",
+            help="Shrink replacement text so it fits the original text's width.",
+        ),
+    ] = False,
     max_size: Annotated[
         int | None,
         typer.Option(
@@ -297,6 +317,7 @@ def batch(
                 max_file_size=max_file_size,
                 custom_fonts=cf,
                 redact_fill=parsed_redact_fill,
+                fit_text=fit_text,
             )
 
         table = Table(title="Batch Results")

@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 import fitz
 
+from ..fonts import bundled_font_path, contains_cjk
 from ..logger import setup_logging
 from .exceptions import (
     FileSizeExceededError,
@@ -19,11 +20,15 @@ from .exceptions import (
     PDFReadError,
 )
 from .font_resolver import FontResolver
-from .models import BatchResult, ModificationResult, ReplacementSpec
+from .models import BatchResult, FontProperties, ModificationResult, ReplacementSpec
 
 logger = setup_logging(__name__)
 
 DEFAULT_MAX_FILE_SIZE_BYTES: int = 100 * 1024 * 1024  # 100 MB
+
+# Lower bound for fit_text shrinking: below this the text is unreadable,
+# so fitting clamps here and warns that the replacement may overflow.
+MIN_FIT_FONTSIZE: float = 4.0
 
 
 class PDFModifier:
@@ -55,6 +60,7 @@ class PDFModifier:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         custom_fonts: dict[str, str] | None = None,
         redact_fill: tuple[float, float, float] | None = (1.0, 1.0, 1.0),
+        fit_text: bool = False,
     ) -> None:
         self.input_path = Path(input_path).absolute()
         self.output_path = Path(output_path).absolute()
@@ -62,13 +68,16 @@ class PDFModifier:
         self.max_file_size = max_file_size
         self._custom_fonts = self._validate_custom_fonts(custom_fonts or {})
         self._redact_fill = self._validate_redact_fill(redact_fill)
+        self._fit_text = fit_text
         self._font_resolver = FontResolver()
+        self._font_cache: dict[str, fitz.Font] = {}
 
         if self.input_path == self.output_path:
             raise ValueError("Input and output paths cannot be the same. Risk of file corruption.")
 
         self._doc: fitz.Document | None = None
         self._warnings: list[str] = []
+        self._failed_insertions = 0
 
     @staticmethod
     def _parse_flags(raw_flags: int | dict[str, int] | None) -> dict[str, int] | None:
@@ -166,12 +175,52 @@ class PDFModifier:
             self._doc.close()
             self._doc = None
 
+    def _load_font(self, fontname: str, fontfile: str | None) -> fitz.Font:
+        """Load (and cache) a fitz.Font for measurement and preflight."""
+        key = fontfile or fontname
+        font = self._font_cache.get(key)
+        if font is None:
+            font = fitz.Font(fontname=fontname, fontfile=fontfile)
+            self._font_cache[key] = font
+        return font
+
+    def _preflight_fonts(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop items whose custom font file cannot be loaded.
+
+        Runs before redaction so a broken font never destroys original text:
+        skipped items keep their original content and produce a warning.
+        """
+        valid: list[dict[str, Any]] = []
+        for item in items:
+            fontfile = item.get("fontfile")
+            if fontfile:
+                try:
+                    self._load_font(item["fontname"], fontfile)
+                except Exception as e:
+                    msg = (
+                        f"Skipping replacement '{item['text']}': "
+                        f"cannot load font file {fontfile}: {e}"
+                    )
+                    logger.warning(msg)
+                    self._warnings.append(msg)
+                    continue
+            valid.append(item)
+        return valid
+
     def _apply_replacements_to_page(
         self,
         page: fitz.Page,
         items: list[dict[str, Any]],
-    ) -> int:
-        """Apply replacements to a single page. Returns count of replacements."""
+    ) -> tuple[int, bool]:
+        """Apply replacements to a single page.
+
+        Returns:
+            Tuple of (successful insertions, whether the page was touched).
+        """
+        items = self._preflight_fonts(items)
+        if not items:
+            return 0, False
+
         for item in items:
             if "bboxes" in item:
                 for bbox in item["bboxes"]:
@@ -187,10 +236,8 @@ class PDFModifier:
 
         page.apply_redactions()
 
-        for item in items:
-            self._insert_replacement(page, item)
-
-        return len(items)
+        inserted = sum(1 for item in items if self._insert_replacement(page, item))
+        return inserted, True
 
     def _process_pages(
         self,
@@ -235,8 +282,10 @@ class PDFModifier:
             items = self._collect_replacements(page, spec)
             if not items:
                 continue
-            pages_modified.add(page_num)
-            total += self._apply_replacements_to_page(page, items)
+            inserted, touched = self._apply_replacements_to_page(page, items)
+            if touched:
+                pages_modified.add(page_num)
+            total += inserted
 
         return total, pages_modified
 
@@ -268,6 +317,7 @@ class PDFModifier:
             ValueError: If page range is invalid.
         """
         doc_opened_here = False
+        self._failed_insertions = 0
         if not self._doc:
             self._doc = self._open_doc()
             doc_opened_here = True
@@ -291,6 +341,7 @@ class PDFModifier:
             output_path=str(self.output_path),
             replacements_made=total,
             pages_modified=len(pages_modified),
+            failed_insertions=self._failed_insertions,
             warnings=self._warnings,
         )
 
@@ -356,6 +407,38 @@ class PDFModifier:
 
         return new_text, url
 
+    def _resolve_font_props(
+        self,
+        font_name: str,
+        font_flags: dict[str, int] | None,
+        text: str,
+    ) -> FontProperties:
+        """Resolve font properties, auto-routing CJK text to the bundled font.
+
+        Custom fonts supplied by the caller take precedence. The bundled
+        Noto Sans JP is used only when the replacement text contains CJK
+        characters and resolution produced no font file (a Base 14 font or
+        the built-in Helvetica fallback), which cannot render CJK glyphs.
+
+        Only Regular and Bold are bundled: italic or monospaced styles
+        degrade to the upright proportional design for CJK text.
+        """
+        props = self._font_resolver.resolve(
+            font_name,
+            font_flags=font_flags,
+            custom_fonts=self._custom_fonts,
+        )
+        if props.fontfile is None and contains_cjk(text):
+            try:
+                fontfile = bundled_font_path(bold=props.is_bold)
+            except FileNotFoundError as e:
+                msg = f"CJK replacement text but bundled CJK font unavailable: {e}"
+                logger.warning(msg)
+                self._warnings.append(msg)
+                return props
+            return props.model_copy(update={"fontfile": fontfile, "embed": True})
+        return props
+
     def _match_single_span(
         self,
         span: dict[str, Any],
@@ -379,11 +462,7 @@ class PDFModifier:
                 # Convert int flags to dict if needed
                 raw_flags = span.get("flags")
                 font_flags = self._parse_flags(raw_flags)
-                font_props = self._font_resolver.resolve(
-                    span["font"],
-                    font_flags=font_flags,
-                    custom_fonts=self._custom_fonts,
-                )
+                font_props = self._resolve_font_props(span["font"], font_flags, new_text)
                 return {
                     "bbox": span["bbox"],
                     "origin": span["origin"],
@@ -492,11 +571,7 @@ class PDFModifier:
         new_text, url = self._resolve_replacement(replacement_raw, matched_text, target, spec)
         raw_flags = first_span.get("flags")
         font_flags = self._parse_flags(raw_flags)
-        font_props = self._font_resolver.resolve(
-            first_span["font"],
-            font_flags=font_flags,
-            custom_fonts=self._custom_fonts,
-        )
+        font_props = self._resolve_font_props(first_span["font"], font_flags, new_text)
 
         return {
             "bbox": (x0, y0, x1, y1),
@@ -583,11 +658,53 @@ class PDFModifier:
             logger.warning(msg)
             self._warnings.append(msg)
 
-    def _insert_replacement(self, page: fitz.Page, item: dict[str, Any]) -> None:
-        """Insert replacement text with original styling."""
+    def _fit_fontsize(self, item: dict[str, Any]) -> float:
+        """Shrink the font size so the replacement text fits the original bbox.
+
+        The shrink is clamped at ``MIN_FIT_FONTSIZE``; when the clamp kicks
+        in a warning is recorded because the text may still overflow.
+        For cross-span matches the reference width is the merged bbox of the
+        involved spans, which can be wider than the exact matched region.
+        """
+        size: float = item["size"]
+        bbox = item["bbox"]
+        available: float = float(bbox[2]) - float(bbox[0])
+        if available <= 0:
+            logger.debug("Degenerate bbox for '%s'; skipping fit", item["text"])
+            return size
+        try:
+            font = self._load_font(item["fontname"], item.get("fontfile"))
+            width = float(font.text_length(item["text"], fontsize=size))
+        except Exception as e:
+            logger.debug("Could not measure text for fit: %s", e)
+            return size
+        if width <= available:
+            return size
+        fitted = size * available / width
+        if fitted < MIN_FIT_FONTSIZE:
+            msg = (
+                f"Replacement '{item['text']}' needs fontsize {fitted:.2f} to fit; "
+                f"clamped to {MIN_FIT_FONTSIZE} — text may overflow its region."
+            )
+            logger.warning(msg)
+            self._warnings.append(msg)
+            fitted = MIN_FIT_FONTSIZE if size >= MIN_FIT_FONTSIZE else size
+        logger.debug("Fitting '%s': fontsize %.2f -> %.2f", item["text"], size, fitted)
+        return fitted
+
+    def _insert_replacement(self, page: fitz.Page, item: dict[str, Any]) -> bool:
+        """Insert replacement text with original styling.
+
+        Returns:
+            True if the text was inserted, False if insertion failed
+            (a warning is recorded; the original text is already redacted).
+        """
         color = self._convert_color(item["color"])
         fontname = item["fontname"]
         fontfile = item.get("fontfile")
+
+        if self._fit_text:
+            item["size"] = self._fit_fontsize(item)
 
         # PyMuPDF ignores fontfile when fontname is a Base 14 font.
         # When a custom fontfile is provided, use a non-Base14 fontname
@@ -595,20 +712,31 @@ class PDFModifier:
         if fontfile:
             fontname = f"__custom_{Path(fontfile).stem}__"
 
-        page.insert_text(
-            item["origin"],
-            item["text"],
-            fontname=fontname,
-            fontsize=item["size"],
-            color=color,
-            fontfile=fontfile,
-        )
+        try:
+            page.insert_text(
+                item["origin"],
+                item["text"],
+                fontname=fontname,
+                fontsize=item["size"],
+                color=color,
+                fontfile=fontfile,
+            )
+        except Exception as e:
+            msg = (
+                f"Could not insert replacement '{item['text']}': {e}. "
+                "The original text was already redacted, leaving a blank region."
+            )
+            logger.warning(msg)
+            self._warnings.append(msg)
+            self._failed_insertions += 1
+            return False
 
         link_url = item["url"]
         if not link_url and item["text"].strip().startswith(("http://", "https://")):
             link_url = item["text"].strip()
         if link_url:
             self._insert_link(page, item, link_url)
+        return True
 
 
 def batch_process(
@@ -619,6 +747,7 @@ def batch_process(
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     custom_fonts: dict[str, str] | None = None,
     redact_fill: tuple[float, float, float] | None = (1.0, 1.0, 1.0),
+    fit_text: bool = False,
 ) -> BatchResult:
     """
     Apply the same replacements to multiple PDF files.
@@ -635,6 +764,7 @@ def batch_process(
         custom_fonts: Optional map of alias -> font file path.
         redact_fill: Optional RGB redaction fill. None disables the fill.
                      Defaults to white (1.0, 1.0, 1.0).
+        fit_text: If True, shrink replacement text to fit the original bbox width.
 
     Returns:
         BatchResult with per-file results and aggregate statistics.
@@ -661,6 +791,7 @@ def batch_process(
                 max_file_size=max_file_size,
                 custom_fonts=custom_fonts,
                 redact_fill=redact_fill,
+                fit_text=fit_text,
             )
             result = modifier.process(spec)
             results.append(result)

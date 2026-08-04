@@ -166,6 +166,7 @@ def modify_pdf_content(
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     custom_fonts: dict[str, str] | None = None,
     redact_fill: list[float] | str | None = None,
+    fit_text: bool = False,
 ) -> str:
     """
     Find and replace text in a PDF while preserving font styles.
@@ -212,6 +213,9 @@ def modify_pdf_content(
                       "helv"/"HeBo" to an absolute .ttf/.otf path. Use TTF for CJK.
         redact_fill: Redaction RGB color as [r, g, b] with values from 0.0 to 1.0.
                      Use "none" for no fill. Omit for the default white fill.
+        fit_text: If true, replacement text wider than the original text's
+                  bbox is shrunk proportionally so it does not overflow.
+                  Useful for translations that are longer than the source.
 
     Returns:
         JSON string with modification results including:
@@ -277,6 +281,7 @@ def modify_pdf_content(
         max_file_size=max_file_size,
         custom_fonts=custom_fonts,
         redact_fill=_parse_redact_fill(redact_fill),
+        fit_text=fit_text,
     )
     result = modifier.process(spec, pages=page_range)
     return result.model_dump_json(indent=2)
@@ -377,6 +382,7 @@ def batch_modify_pdf_content(
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     custom_fonts: dict[str, str] | None = None,
     redact_fill: list[float] | str | None = None,
+    fit_text: bool = False,
 ) -> str:
     """
     Apply the same text replacements to multiple PDF files at once.
@@ -396,6 +402,8 @@ def batch_modify_pdf_content(
                       "helv"/"HeBo" to an absolute .ttf/.otf path. Use TTF for CJK.
         redact_fill: Redaction RGB color as [r, g, b] with values from 0.0 to 1.0.
                      Use "none" for no fill. Omit for the default white fill.
+        fit_text: If true, replacement text wider than the original text's
+                  bbox is shrunk proportionally so it does not overflow.
 
     Returns:
         JSON string with batch results including per-file status.
@@ -418,6 +426,7 @@ def batch_modify_pdf_content(
         max_file_size=max_file_size,
         custom_fonts=custom_fonts,
         redact_fill=_parse_redact_fill(redact_fill),
+        fit_text=fit_text,
     )
     return result.model_dump_json(indent=2)
 
